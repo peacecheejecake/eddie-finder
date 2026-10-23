@@ -266,15 +266,26 @@ def fill_in_browser(args, zizum: int, theme: dict, slot: dict, page) -> None:
     if want not in people:
         log(f"인원 {want}명 선택 불가 (가능: {people}). 가장 가까운 값으로")
         want = min(people, key=lambda v: abs(int(v) - args.people))
-    page.evaluate("v => jQuery('#person').val(v).trigger('change')", want)
-    page.fill("#name_input", args.name)
-    page.fill("input[name=mobile2]", args.phone[3:7])
-    page.fill("input[name=mobile3]", args.phone[7:])
-    # 체크박스는 커스텀 UI(span.ui) 뒤에 숨어 있어 직접 체크
-    page.evaluate("""() => ['agree_1', 'agree_2'].forEach(n => {
-        const el = document.querySelector(`input[name=${n}]`);
-        el.checked = true; el.dispatchEvent(new Event('change', {bubbles: true}));
-    })""")
+    # 입력값을 채우는 함수를 페이지에 심어 두고, [예약하기] 클릭 시 사이트 검증보다 먼저 다시 채운다.
+    # (CAPTCHA 푸는 동안 연락처 칸 등을 실수로 건드려도 올바른 값으로 제출되도록)
+    page.evaluate(
+        """([person, name, m2, m3]) => {
+            window.__ekFill = () => {
+                const q = s => document.querySelector(s);
+                if (q('#person').value !== person) jQuery('#person').val(person).trigger('change');
+                q('#name_input').value = name;
+                q('input[name=mobile2]').value = m2;
+                q('input[name=mobile3]').value = m3;
+                // 체크박스는 커스텀 UI(span.ui) 뒤에 숨어 있어 직접 체크
+                ['agree_1', 'agree_2'].forEach(n => { q(`input[name=${n}]`).checked = true; });
+            };
+            window.addEventListener('click', e => {
+                if (e.target.closest && e.target.closest('.submit')) window.__ekFill();
+            }, true);
+            window.__ekFill();
+        }""",
+        [want, args.name, args.phone[3:7], args.phone[7:]],
+    )
     page.locator("#captcha").scroll_into_view_if_needed()
     page.bring_to_front()
     log(f"입력 완료: {theme['info_name']} {args.date} {revtime} / {args.name} / {want}명")
@@ -318,7 +329,18 @@ def main() -> None:
         # 개발자도구 감지 스크립트 차단 (자동화 탐지 오작동 방지)
         ctx.route(re.compile(r"devtools-detector"), lambda r: r.abort())
         page = ctx.new_page()
-        page.on("dialog", lambda d: (log(f"alert: {d.message}"), d.accept()))
+        manual = False
+
+        def on_dialog(d) -> None:
+            # 자동 진행 중엔 바로 닫고, 사용자 단계에선 alert를 그대로 띄워 직접 확인하게 한다
+            if not manual:
+                log(f"alert: {d.message}")
+                d.accept()
+                return
+            log(f"\a alert: {d.message}")
+            print(f"\n!!! 브라우저 알림: {d.message}  (브라우저에서 [확인] 후 다시 시도)\n", flush=True)
+
+        page.on("dialog", on_dialog)
 
         def warm() -> None:
             page.goto(referer, wait_until="domcontentloaded")
@@ -333,6 +355,7 @@ def main() -> None:
             warm()
         slot, _ = wait_for_open(api, args, zizum, int(theme["theme_num"]), open_at, offset)
         fill_in_browser(args, zizum, theme, slot, page)
+        manual = True
 
         try:
             page.wait_for_url(re.compile(r"reservation3\.php"), timeout=0)
